@@ -1,0 +1,25 @@
+FROM node:22-slim
+
+WORKDIR /app
+COPY roblox-downloader/ ./
+
+ENV HOST=0.0.0.0
+ENV PORT=8789
+ENV CACHE_DIR=/tmp/rad-web
+ENV MUSIC_DIR=/tmp/rad-music
+ENV RATE_MAX=300
+ENV GLOBAL_RATE_MAX=120
+ENV ASSET_DOWNLOAD_CONCURRENCY=1
+ENV ASSET_DOWNLOAD_QUEUE_MAX=20
+ENV ASSET_UPLOAD_QUEUE_MAX=5
+ENV MUSIC_GLOBAL_RATE_MAX=60
+ENV MUSIC_CONCURRENCY=1
+ENV MUSIC_QUEUE_MAX=20
+
+USER node
+EXPOSE 8789
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:8789/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
+CMD ["node", "server.mjs"]

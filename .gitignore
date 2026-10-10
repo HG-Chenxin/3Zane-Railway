@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+public/
+
+# Downloads & user data
+downloads/
+data/
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.opus
+*.flac
+*.wav
+*.wma
+
+# Environment
+.env
+.env.local
+
+# Cookies
+cookie.txt
+cookie.txt.bak
+cookies.txt
+cookies.txt.bak
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
