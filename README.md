@@ -9,6 +9,8 @@ Create both services from this repository in one Railway project and environment
 1. **Downloader**: repository root build context, `Dockerfile.downloader` Dockerfile, private networking only, port `8789`, no public domain.
 2. **Spoofer worker**: repository root build context, `spoofer-worker/Dockerfile` Dockerfile, public HTTPS domain enabled, port `8790`.
 
+The downloader is an internal API service, not a website; only the Spoofer worker receives a public domain.
+
 Set `APP_PASSWORD` on the downloader. It must match the worker's `ROBLOX_DOWNLOAD_API_KEY`.
 
 Set these variables on the worker:
@@ -50,9 +52,10 @@ From this repository root:
 
 ```bash
 npm ci --prefix spoofer-worker
+npm run lint --prefix spoofer-worker
 node --check spoofer-worker/server.js
 node --test spoofer-worker
-node --test roblox-downloader/lib/bounded-queue.test.mjs roblox-downloader/lib/roblox.test.mjs
+node --test roblox-downloader
 ```
 
 ## Moving data from an expired Railway account

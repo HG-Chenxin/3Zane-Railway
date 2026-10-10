@@ -7,16 +7,11 @@
 import http from "node:http";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
-import path from "node:path";
 import crypto from "node:crypto";
-import { fileURLToPath } from "node:url";
 import * as roblox from "./lib/roblox.mjs";
 import * as music from "./lib/music.mjs";
 import { createBoundedQueue } from "./lib/bounded-queue.mjs";
 import { consumeRateLimit } from "./lib/rate-limit.mjs";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PUBLIC_DIR = path.join(__dirname, "public");
 
 const PORT = Number(process.env.PORT || 8789);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -42,15 +37,6 @@ const MAX_UPLOAD_BODY = Math.ceil((MAX_UPLOAD_BYTES * 4) / 3) + 64 * 1024;   // 
 
 const UPSTREAM = "https://assetdelivery.roblox.com/v1/asset";
 const CLIENT_UA = "Roblox/WinInet";
-
-const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".webmanifest": "application/manifest+json",
-};
 
 const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
@@ -170,16 +156,19 @@ function readJsonBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let oversized = false;
     req.on("data", (chunk) => {
+      if (oversized) return;
       size += chunk.length;
       if (size > limit) {
+        oversized = true;
         reject(Object.assign(new Error("Payload terlalu besar"), { status: 413 }));
-        req.destroy();
         return;
       }
       chunks.push(chunk);
     });
     req.on("end", () => {
+      if (oversized) return;
       if (!chunks.length) return resolve({});
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
@@ -289,14 +278,31 @@ async function fetchAsset({ assetId, cookie, placeId }) {
 
     const declared = Number(upstream.headers.get("content-length") || 0);
     if (declared > MAX_BYTES) {
+      await upstream.body?.cancel().catch(() => {});
       return { ok: false, status: 413, message: "File melebihi batas ukuran server", code: "TOO_LARGE" };
     }
 
-    const buffer = Buffer.from(await upstream.arrayBuffer());
-    if (buffer.length > MAX_BYTES) {
-      return { ok: false, status: 413, message: "File melebihi batas ukuran server", code: "TOO_LARGE" };
+    const chunks = [];
+    let size = 0;
+    const reader = upstream.body?.getReader();
+    if (reader) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > MAX_BYTES) {
+            await reader.cancel().catch(() => {});
+            return { ok: false, status: 413, message: "File melebihi batas ukuran server", code: "TOO_LARGE" };
+          }
+          chunks.push(Buffer.from(value));
+        }
+      } finally {
+        reader.releaseLock();
+      }
     }
 
+    const buffer = Buffer.concat(chunks, size);
     return { ok: true, buffer, ext: sniffExtension(buffer) };
   } finally {
     clearTimeout(timer);
@@ -700,30 +706,6 @@ async function fetchAssetName(assetId) {
   }
   cacheAssetName(assetId, null, null);
   return { name: null, assetTypeId: null };
-}
-
-/* ---------------------------- static files ---------------------------- */
-
-async function serveStatic(_req, res, pathname) {
-  const rel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-  const target = path.resolve(PUBLIC_DIR, rel);
-  if (!target.startsWith(PUBLIC_DIR + path.sep)) {
-    return sendJson(res, 403, { error: "Forbidden" });
-  }
-  let data;
-  try {
-    data = await fsp.readFile(target);
-  } catch {
-    return sendJson(res, 404, { error: "Not found" });
-  }
-  const type = MIME[path.extname(target).toLowerCase()] || "application/octet-stream";
-  res.writeHead(200, {
-    ...SECURITY_HEADERS,
-    "Content-Type": type,
-    "Content-Length": data.length,
-    "Cache-Control": "no-store",
-  });
-  res.end(data);
 }
 
 /* ------------------------------- routes ------------------------------- */
@@ -1228,7 +1210,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 405, { error: "Method not allowed" });
     }
 
-    return await serveStatic(req, res, pathname);
+    return sendJson(res, 404, { error: "Not found" });
   } catch (err) {
     console.error(JSON.stringify({ ip, path: pathname, err: String(err?.message || err) }));
     const status = Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 500;

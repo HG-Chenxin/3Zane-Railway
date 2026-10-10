@@ -9,8 +9,8 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 
-let YTDLP = process.env.YTDLP_PATH || "yt-dlp";
-let FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
+const YTDLP = process.env.YTDLP_PATH || "yt-dlp";
+const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(os.tmpdir(), "rad-music");
 const JOB_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_SOURCE_SECONDS = 20 * 60;
@@ -21,11 +21,6 @@ const MIN_DB = -24;
 const MAX_DB = 12;
 const DEFAULT_DB = -4;
 const BITRATE_LADDER = [128, 96, 64];
-
-export function configureMusicTools({ ytDlpPath, ffmpegPath } = {}) {
-  if (ytDlpPath) YTDLP = ytDlpPath;
-  if (ffmpegPath) FFMPEG = ffmpegPath;
-}
 
 /* ------------------------------ argumen -------------------------------- */
 

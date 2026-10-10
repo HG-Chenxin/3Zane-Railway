@@ -116,7 +116,8 @@ export function thumbnail(kind, id) {
 /**
  * Nggak ada endpoint "validate key" resmi. Yang bisa kita pakai: request ke
  * salah satu route Assets API. 401 + "Invalid API Key" = key salah,
- * 403/404 = key hidup (izin's atau objeknya yang bermasalah).
+ * 403/404 atau 2xx = key diterima (izin atau objeknya mungkin bermasalah).
+ * Status lain tidak cukup untuk menyimpulkan bahwa key valid.
  */
 export async function verifyApiKey(apiKey) {
   const res = await fetch(`${API_HOST}/assets/v1/assets/1`, {
@@ -133,7 +134,14 @@ export async function verifyApiKey(apiKey) {
   if (res.status === 403) {
     return { valid: true, reason: "Key hidup, tapi butuh izin Assets API" };
   }
-  return { valid: true, reason: "Key hidup" };
+  if (res.status === 404 || (res.status >= 200 && res.status < 300)) {
+    return { valid: true, reason: "Key hidup" };
+  }
+  return {
+    valid: false,
+    reason: `Roblox tidak dapat memverifikasi API key (HTTP ${res.status})`,
+    detail: body.slice(0, 200),
+  };
 }
 
 /* ---------------------------- Assets API ------------------------------- */
