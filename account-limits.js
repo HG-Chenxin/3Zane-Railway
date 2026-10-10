@@ -261,15 +261,15 @@ async function settleSpooferJobQuota(db, progressId, expectedOwnerId) {
             throw new Error(`Spoofer quota reservation is invalid for job ${progressId}.`);
         }
 
-        const uploadedAssets = jobData.assets.filter((asset) => (
+        const storedAssets = jobData.assets.filter((asset) => (
             asset.status === 'success'
             && typeof asset.assetId === 'string'
-            && typeof jobData.remoteFiles?.assets?.[asset.assetId] === 'string'
+            && typeof jobData.localFiles?.assets?.[asset.assetId] === 'string'
         )).length;
-        if (uploadedAssets > reservedAssets) {
-            throw new Error(`Spoofer job ${progressId} reports more uploaded assets than reserved.`);
+        if (storedAssets > reservedAssets) {
+            throw new Error(`Spoofer job ${progressId} reports more stored assets than reserved.`);
         }
-        const refundedAssets = reservedAssets - uploadedAssets;
+        const refundedAssets = reservedAssets - storedAssets;
         const accountKey = `discord:${row.owner_id}`;
         if (refundedAssets > 0) {
             await client.query(`
@@ -292,7 +292,7 @@ async function settleSpooferJobQuota(db, progressId, expectedOwnerId) {
             status: 'settled',
             usageDay,
             reservedAssets,
-            billableAssets: uploadedAssets,
+            billableAssets: storedAssets,
             refundedAssets,
             settledAt: new Date().toISOString(),
         };

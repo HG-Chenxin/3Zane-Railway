@@ -296,7 +296,7 @@ function createRobloxAssetBulkDownloadHandler({
             }
             progressJobs.delete(progressId);
             void onJobCleanup({ progressId, job }).catch((error) => {
-                console.error('[ROBLOX DOWNLOAD V2] Failed to clean up remote job files:', error.message);
+                console.error('[ROBLOX DOWNLOAD V2] Failed to clean up job files:', error.message);
             });
             void fsPromises.rm(job.tempDir, { recursive: true, force: true }).catch((error) => {
                 console.error('[ROBLOX DOWNLOAD V2] Failed to remove expired temporary files:', error.message);
@@ -313,7 +313,7 @@ function createRobloxAssetBulkDownloadHandler({
                 progressJobs.delete(id);
                 clearTimeout(job.cleanupTimer);
                 void onJobCleanup({ progressId: id, job }).catch((error) => {
-                    console.error('[ROBLOX DOWNLOAD V2] Failed to clean up remote job files:', error.message);
+                    console.error('[ROBLOX DOWNLOAD V2] Failed to clean up job files:', error.message);
                 });
                 void fsPromises.rm(job.tempDir, { recursive: true, force: true }).catch((error) => {
                     console.error('[ROBLOX DOWNLOAD V2] Failed to remove expired temporary files:', error.message);
@@ -795,15 +795,12 @@ function createRobloxAssetBulkDownloadHandler({
                     }
                     const timedOut = error.code === 'ECONNABORTED';
                     const storageFailed = ['ENOSPC', 'EACCES', 'EPERM'].includes(error.code);
-                    const bucketUploadFailed = error.code === 'SPOOFER_BUCKET_UPLOAD_FAILED';
                     const jobStatusFailed = error.code === 'SPOOFER_JOB_PERSIST_FAILED';
                     const sizeLimitExceeded = error.code === 'BULK_SIZE_LIMIT';
                     const message = timedOut
                         ? 'Request ke downloader melewati batas waktu.'
                         : sizeLimitExceeded
                             ? error.message
-                        : bucketUploadFailed
-                            ? 'Gagal menyimpan asset hasil ke Railway Bucket.'
                         : jobStatusFailed
                             ? 'Penyimpanan status worker sementara tidak tersedia.'
                         : storageFailed
@@ -1035,15 +1032,12 @@ function createRobloxAssetBulkDownloadHandler({
             return;
         } catch (error) {
             const storageFull = error.code === 'ENOSPC';
-            const bucketUploadFailed = error.code === 'SPOOFER_BUCKET_UPLOAD_FAILED';
             const jobStatusFailed = error.code === 'SPOOFER_JOB_PERSIST_FAILED';
             const archiveContentMismatch = error.code === 'ARCHIVE_CONTENT_MISMATCH' || error.code === 'ENOENT';
             console.error('[ROBLOX DOWNLOAD V2] Failed to prepare archive:', error.code || error.message);
             job.state = 'failed';
             job.error = storageFull
                 ? 'Penyimpanan sementara worker penuh saat membuat arsip. Kurangi jumlah asset dalam batch.'
-                : bucketUploadFailed
-                    ? 'Gagal menyimpan arsip hasil ke Railway Bucket.'
                 : jobStatusFailed
                     ? 'Penyimpanan status worker sementara tidak tersedia.'
                 : archiveContentMismatch
@@ -1051,10 +1045,8 @@ function createRobloxAssetBulkDownloadHandler({
                 : 'Gagal membuat arsip hasil download.';
             job.errorCode = storageFull
                 ? 'TEMP_STORAGE_FULL'
-                : bucketUploadFailed
-                    ? 'BUCKET_UPLOAD_FAILED'
-                    : jobStatusFailed
-                        ? 'JOB_STATUS_UNAVAILABLE'
+                : jobStatusFailed
+                    ? 'JOB_STATUS_UNAVAILABLE'
                     : archiveContentMismatch
                         ? 'ARCHIVE_INCOMPLETE'
                         : 'ARCHIVE_FAILED';
@@ -1062,9 +1054,9 @@ function createRobloxAssetBulkDownloadHandler({
             job.updatedAt = job.finishedAt;
             await persistJobUpdate();
             try {
-                await fsPromises.rm(tempDir, { recursive: true, force: true });
+                await fsPromises.rm(path.join(tempDir, 'roblox-spoofer-assets.zip'), { force: true });
             } catch (cleanupError) {
-                console.error('[ROBLOX DOWNLOAD V2] Failed to remove incomplete archive files:', cleanupError.message);
+                console.error('[ROBLOX DOWNLOAD V2] Failed to remove incomplete archive:', cleanupError.message);
             }
             scheduleProgressCleanup(progressId, job);
             return;

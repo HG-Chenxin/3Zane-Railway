@@ -1,11 +1,16 @@
 const express = require('express');
 const { Pool } = require('pg');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const fsPromises = require('node:fs/promises');
 const { pipeline } = require('node:stream/promises');
 const { createContentLengthVerifier } = require('./download-integrity');
 const {
-    createRailwayObjectStorageFromEnv,
-} = require('../railway-object-storage');
+    removeLocalJobFiles,
+    resolveLocalJobFile,
+    serializeLocalJobFiles,
+} = require('./local-job-files');
 const {
     createRobloxAssetBulkDownloadHandler,
     createRobloxAssetDownloadHandler,
@@ -29,7 +34,7 @@ const MAX_ASSETS_PER_BATCH = Number(process.env.SPOOFER_MAX_ASSETS_PER_BATCH || 
 const MAX_BYTES_PER_JOB = Number(process.env.SPOOFER_MAX_BYTES_PER_JOB || 2 * 1024 ** 3);
 const MAX_CONCURRENT_JOBS = API_RATE_LIMITS.spooferConcurrentJobsPerInstance;
 const MAX_QUEUED_JOBS = API_RATE_LIMITS.spooferMaxQueuedJobs;
-const BUCKET_PREFIX = (process.env.SPOOFER_BUCKET_PREFIX || 'spoofer').replace(/^\/+|\/+$/g, '');
+const FILES_DIR = path.resolve(process.env.SPOOFER_FILES_DIR || path.join(os.tmpdir(), '3zane-spoofer'));
 const JOB_RETENTION_MS = 60 * 60 * 1000;
 
 function requiredEnv(name, value) {
@@ -47,9 +52,6 @@ if (!Number.isSafeInteger(MAX_BYTES_PER_JOB) || MAX_BYTES_PER_JOB < 1) {
     throw new RangeError('SPOOFER_MAX_BYTES_PER_JOB must be a positive safe integer.');
 }
 
-const storage = createRailwayObjectStorageFromEnv();
-if (!storage) throw new Error('Railway Bucket credentials must be configured on the Spoofer worker.');
-
 const db = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: false },
@@ -57,7 +59,6 @@ const db = new Pool({
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
 });
-const filesByJob = new Map();
 const persistenceQueues = new Map();
 const liveJobs = new Set();
 const app = express();
@@ -97,7 +98,7 @@ function safeJobData(job) {
         downloadType: job.downloadType,
         fileName: job.fileName,
         assets: job.assets,
-        remoteFiles: job.remoteFiles || null,
+        localFiles: serializeLocalJobFiles(job),
         quotaReservation: job.quotaReservation || null,
         quotaSettlement: job.quotaSettlement || null,
     };
@@ -130,17 +131,12 @@ function persistJob(progressId, job) {
 }
 
 async function deleteJobFiles(progressId, job) {
-    const files = job.remoteFiles?.all || filesByJob.get(progressId) || [];
-    const errors = [];
-    for (const key of files) {
-        try {
-            await storage.deleteObject(key);
-        } catch (error) {
-            errors.push(error);
-        }
+    const directory = job.tempDir
+        ? path.basename(job.tempDir)
+        : job.localFiles?.directory;
+    if (directory) {
+        await removeLocalJobFiles(FILES_DIR, directory);
     }
-    filesByJob.delete(progressId);
-    if (errors.length) throw new AggregateError(errors, `Failed to delete ${errors.length} Spoofer objects.`);
     await db.query('DELETE FROM spoofer_worker_jobs WHERE progress_id = $1', [progressId]);
 }
 
@@ -178,63 +174,10 @@ async function cleanupExpiredPersistedJobs() {
         }
         if (Date.now() - new Date(row.updated_at).getTime() < JOB_RETENTION_MS) continue;
         try {
-            await deleteJobFiles(row.progress_id, { remoteFiles: row.job_data.remoteFiles });
+            await deleteJobFiles(row.progress_id, { localFiles: row.job_data.localFiles });
         } catch (error) {
             console.error('[SPOOFER WORKER] Failed to clean up expired job:', row.progress_id, error.message);
         }
-    }
-}
-
-async function uploadJobFiles({ progressId, job, assets, archivePath }) {
-    const remoteFiles = job.remoteFiles || { assets: {}, archive: null, all: [] };
-    for (const asset of assets) {
-        if (!remoteFiles.assets?.[asset.assetId]) {
-            const error = new Error('Asset is missing from Railway Bucket.');
-            error.code = 'SPOOFER_BUCKET_UPLOAD_FAILED';
-            throw error;
-        }
-    }
-    if (!archivePath) return;
-
-    const key = `${BUCKET_PREFIX}/${progressId}/roblox-spoofer-assets.zip`;
-    remoteFiles.archive = key;
-    if (!remoteFiles.all.includes(key)) remoteFiles.all.push(key);
-    job.remoteFiles = remoteFiles;
-    try {
-        await persistJob(progressId, job);
-    } catch (cause) {
-        const error = new Error('Failed to persist the Spoofer archive result.', { cause });
-        error.code = 'SPOOFER_JOB_PERSIST_FAILED';
-        throw error;
-    }
-    try {
-        await storage.uploadFile(archivePath, key, 'application/zip');
-    } catch (cause) {
-        const error = new Error('Failed to upload the Spoofer archive to Railway Bucket.', { cause });
-        error.code = 'SPOOFER_BUCKET_UPLOAD_FAILED';
-        throw error;
-    }
-}
-
-async function uploadJobAsset({ progressId, job, asset }) {
-    const remoteFiles = job.remoteFiles || { assets: {}, archive: null, all: [] };
-    const key = `${BUCKET_PREFIX}/${progressId}/assets/${asset.assetId}`;
-    if (!remoteFiles.assets[asset.assetId]) remoteFiles.all.push(key);
-    remoteFiles.assets[asset.assetId] = key;
-    job.remoteFiles = remoteFiles;
-    try {
-        await persistJob(progressId, job);
-    } catch (cause) {
-        const error = new Error('Failed to persist a Spoofer asset result.', { cause });
-        error.code = 'SPOOFER_JOB_PERSIST_FAILED';
-        throw error;
-    }
-    try {
-        await storage.uploadFile(asset.filePath, key, 'application/octet-stream');
-    } catch (cause) {
-        const error = new Error('Failed to upload a Spoofer asset to Railway Bucket.', { cause });
-        error.code = 'SPOOFER_BUCKET_UPLOAD_FAILED';
-        throw error;
     }
 }
 
@@ -265,7 +208,8 @@ const bulkHandler = createRobloxAssetBulkDownloadHandler({
     maxTotalBytes: MAX_BYTES_PER_JOB,
     maxAssetsPerBatch: MAX_ASSETS_PER_BATCH,
     jobRetentionMs: JOB_RETENTION_MS,
-    retainLocalFiles: false,
+    tempDirectory: FILES_DIR,
+    retainLocalFiles: true,
     getOwnerKey: (req) => req.ownerId,
     onJobAccepted: async ({ progressId, job }) => {
         await persistJob(progressId, job);
@@ -279,17 +223,6 @@ const bulkHandler = createRobloxAssetBulkDownloadHandler({
             }
         } finally {
             if (!['queued', 'processing', 'packaging'].includes(job.state)) liveJobs.delete(progressId);
-        }
-    },
-    onAssetReady: uploadJobAsset,
-    onJobReady: async (jobData) => {
-        await uploadJobFiles(jobData);
-        try {
-            await fsPromises.rm(jobData.job.tempDir, { recursive: true, force: true });
-            jobData.job.archivePath = null;
-            jobData.job.assetPaths.clear();
-        } catch (error) {
-            console.error('[SPOOFER WORKER] Failed to remove local files after bucket upload:', error.message);
         }
     },
     onJobCleanup: ({ progressId, job }) => deleteJobFiles(progressId, job),
@@ -317,7 +250,8 @@ app.get('/health', (_req, res) => {
         status: 'ok',
         apiVersion: 3,
         supportedTiers: Object.keys(PLAN_LIMITS),
-        bucket: 'configured',
+        bucket: 'not-used',
+        resultStorage: 'worker-disk',
         database: 'configured',
         jobs: bulkHandler.getStatus(),
     });
@@ -463,7 +397,7 @@ app.get('/internal/jobs/:progressId/download/:kind/:assetId?', requireWorkerKey,
         if (!saved || saved.owner_id !== ownerId) {
             return res.status(404).json({ error: 'File tidak ditemukan atau sudah kedaluwarsa.', code: 'FILE_NOT_FOUND' });
         }
-        const files = saved.job_data.remoteFiles;
+        const files = saved.job_data.localFiles;
         const archive = req.params.kind === 'archive' && !req.params.assetId;
         const assetId = req.params.kind === 'asset' ? req.params.assetId : null;
         if (!archive && !assetId) {
@@ -475,35 +409,32 @@ app.get('/internal/jobs/:progressId/download/:kind/:assetId?', requireWorkerKey,
         const asset = assetId
             ? saved.job_data.assets.find((item) => item.assetId === assetId && item.status === 'success')
             : null;
-        const key = archive ? files?.archive : files?.assets?.[assetId];
-        if (!key || (!archive && (!asset || !/^\d{1,20}$/.test(assetId || '')))) {
+        const relativeFile = archive ? files?.archive : files?.assets?.[assetId];
+        const filePath = resolveLocalJobFile(FILES_DIR, files, relativeFile);
+        if (!filePath || (!archive && (!asset || !/^\d{1,20}$/.test(assetId || '')))) {
             return res.status(404).json({ error: 'File tidak ditemukan atau sudah kedaluwarsa.', code: 'FILE_NOT_FOUND' });
         }
         const fileName = archive
             ? 'roblox-spoofer-assets.zip'
             : asset.fileName;
         if (!fileName) return res.status(404).json({ error: 'File tidak ditemukan.', code: 'FILE_NOT_FOUND' });
-        let object;
+        let fileStat;
         try {
-            object = await storage.getObject(key);
+            fileStat = await fsPromises.stat(filePath);
         } catch (error) {
-            if (error.name === 'NoSuchKey' || error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
-                return res.status(404).json({ error: 'File hasil tidak ditemukan di object storage.', code: 'RESULT_FILE_MISSING' });
+            if (error.code === 'ENOENT') {
+                return res.status(404).json({ error: 'File hasil tidak ditemukan di penyimpanan worker.', code: 'RESULT_FILE_MISSING' });
             }
             throw error;
-        }
-        if (!object.Body) {
-            return res.status(502).json({ error: 'Object storage tidak mengembalikan isi file.', code: 'RESULT_FILE_EMPTY' });
         }
         const expectedBytes = archive ? saved.job_data.archiveBytes : asset.sizeBytes;
         if (!Number.isSafeInteger(expectedBytes)
             || expectedBytes < 1
-            || !Number.isSafeInteger(object.ContentLength)
-            || object.ContentLength !== expectedBytes) {
-            object.Body.destroy?.();
-            console.error('[SPOOFER WORKER] Stored result size mismatch:', req.params.progressId, req.params.kind);
+            || !Number.isSafeInteger(fileStat.size)
+            || fileStat.size !== expectedBytes) {
+            console.error('[SPOOFER WORKER] Local result size mismatch:', req.params.progressId, req.params.kind);
             return res.status(502).json({
-                error: 'Ukuran file hasil di object storage tidak sesuai. Coba buat ulang arsip.',
+                error: 'Ukuran file hasil di penyimpanan worker tidak sesuai. Coba buat ulang arsip.',
                 code: 'RESULT_SIZE_MISMATCH',
             });
         }
@@ -518,7 +449,7 @@ app.get('/internal/jobs/:progressId/download/:kind/:assetId?', requireWorkerKey,
         res.setHeader('Cache-Control', 'no-store');
         res.setHeader('X-Content-Type-Options', 'nosniff');
         res.setHeader('Content-Length', String(expectedBytes));
-        await pipeline(object.Body, createContentLengthVerifier(expectedBytes), res);
+        await pipeline(fs.createReadStream(filePath), createContentLengthVerifier(expectedBytes), res);
     } catch (error) {
         console.error('[SPOOFER WORKER] Failed to stream result file:', error.message);
         if (res.headersSent) res.destroy(error);
@@ -533,6 +464,7 @@ app.use((error, _req, res, next) => {
 });
 
 async function start() {
+    await fsPromises.mkdir(FILES_DIR, { recursive: true });
     await ensureSchema();
     await cleanupExpiredPersistedJobs();
     const cleanupTimer = setInterval(() => {
